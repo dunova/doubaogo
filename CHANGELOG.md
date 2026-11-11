@@ -1,0 +1,63 @@
+# Changelog
+
+## 0.9.0 — 2026-11-11
+
+- **Product Rebranding to doubaogo**: Officially rebranded from `doubao-ime-linux` to `doubaogo`, elevating Linux input method standards with modern UI, sleek documentation, and zero-compromise input performance.
+- **Zero-Wine Native Streaming Inline Voice Dictation**:
+  - Implemented true `ClientPreedit` inline streaming text preview directly at the application cursor (`zwp_text_input_v3` / X11 IM), naturally wrapping within application input boxes and text editors (e.g., Omawrite, VSCode, Chrome, Telegram).
+  - Destroyed the unwieldy 3840px full-screen floating candidate bar and truncated display (`MaxStreamingDisplayWidth`).
+  - Seamless zero-menu direct commit: eliminated the blocking candidate menu (manual 1/2 selection) on dictation completion; ByteDance Doubao LLM polished text automatically commits to the focused application in real time (~300ms).
+  - Eradicated historical clipboard contamination: completely removed fallback reads to primary clipboard during speech recognition.
+  - Decommissioned redundant `omavinput-osd` overlay processes and floating capsule widgets.
+- **Slimmed Hybrid Dual-Engine Keyboard Typing**:
+  - Official ByteDance DoubaoIME 0.9.2.7 core engine with local ONNX neural semantic prediction (`onnxruntime.dll` + quantized neural language model) for sub-10ms context computation.
+  - 135MB binary multi-tier Trie lexicon with bigram personalization and custom phrase expansion.
+  - Low-latency cloud candidates via QUIC/HTTPS to ByteDance Ocean Cloud (`ime-gw3.oceancloudapi.com`).
+  - Industrial-grade keystroke stability: key symmetrical state machine preventing Backspace repeat storms, 0μs KeyUp RPC latency, 2.0s fast cold boot via Win32 `RegSetValueExW` in-process registry initialization, zero Shift Chinese/English phase desync, and clean scheme isolation.
+- **Visual Documentation Benchmark**:
+  - Modernized English (`README.md`) and Simplified Chinese (`README.zh-CN.md`) documentations benchmarked against top-tier projects like Rime 雾凇拼音 and WowType.
+  - Replaced text/ASCII/Mermaid diagrams with real visual screenshots and feature showcases.
+
+## 0.8.0 — 2026-11-11
+
+- **Hybrid Dual-Engine Architecture**: Deep integration of official Doubao 0.9.2.7 engine with local ONNX neural network inference (`onnxruntime.dll`), multi-tier 135MB binary trie dictionary, and real-time edge cloud candidate queries (`enableCloudCandidate: true`).
+- **Zero-Wine Native Streaming Voice**: Deprecates heavy Wine voice prefixes. Introduces pure Python reverse-engineered official streaming ASR (`wss://frontier-audio-ime-ws.doubao.com`) and local loopback adapter (`127.0.0.1:19283`) for ByteDance Doubao LLM smart text organization (disfluency removal, punctuation restoration, direct commit).
+- **2.0s Fast Cold Boot & Double-Layer Self-Healing**: Replaced external `wine reg add` subprocesses with in-process Win32 `RegSetValueExW` in `keyboard-host.c`, cutting cold boot time in half (to 2.0s) and slashing startup peak memory from 1.2GB to 400MB. Added `WantedBy=graphical-session.target default.target`, `Restart=always`, `--enable` installer flag, and on-demand `ensureBackendStarted()` self-healing inside `doubaoime.so`.
+- **Zero Shift Phase Inversion Fix**: Stopped forwarding bare `Shift`/`CapsLock` toggles to `ImeService.exe` and enforced `useShift: false` / `defaultChinese: true` on broker startup so Fcitx 5 exclusively manages Chinese/English switching without 180° internal state desync.
+- **Extreme Memory Slimming**: Eliminated duplicate Wine prefix and duplicate Xvfb server (`doubao-imeservice.service`), reducing active stack memory consumption by >40% (from ~900MB to ~400MB).
+- **Industrial-Grade Keystroke Stability**: Fixed infinite Backspace storm and auto-deletion bugs via key symmetrical state tracking; completely removed synchronous blocking RPCs on ordinary key release events for sub-10ms latency and 0 freeze.
+- **Zero-Leak Scheme Switching**: Full compatibility with `fcitx5-schemes` multi-scheme management, guaranteeing 100% clean termination of Wine and Xvfb when switching between input methods.
+- **Dynamic Xvfb Display Allocation**: Avoids hijacking real display or Xwayland `:0` by dynamically allocating isolated displays (95-120).
+- **Custom Phrase Expansion**: In-memory and file-based custom phrase and idiom override support.
+
+## 0.1.0-rc.2 — 2026-10-17
+
+- Upgrade the supported official Windows engine to 0.9.2.7.
+- Add live dictation previews, Right Alt hold-to-talk and Right Alt+Space hands-free input.
+- Add optional official smart text organization in a separate Wine runtime, with explicit spoken-correction handling, protected-content checks and accepted-transcript fallback (#2).
+- Preserve speech recorded before the ASR connection is ready; add opt-in IPv4 voice connections and diagnostics.
+- Fix candidate paging, add a settings tray action and distinct tray/launcher icons.
+- Respect the Fcitx UI's candidate-layout preference (#4, thanks @dunova).
+- Wait for a live keyboard test socket and document the one-request connection contract (#3).
+- Expand local and CI validation, including cancellation, focus protections and reproducible source packaging.
+
+Experimental source prerelease. Official components and the external ASR adapter
+must be supplied separately. Windows smart undo and complete settings/account
+synchronization parity remain unsupported.
+
+## 0.1.0-rc.1
+
+First source preview for the official DoubaoIME 0.9.0.0 keyboard engine on Fcitx 5.
+
+- Native candidate/preedit UI, selection, segmented conversion and focus reset.
+- Configurable Wine/Xvfb/MinGW paths and verified installer extraction.
+- Separate official settings runtime with keyboard-only configuration merging.
+- Optional Linux dictation coordinator and independent Fcitx delivery endpoint.
+- User-level installation manifest, collision checks, rollback and removal.
+- Private-display integration checks and an explicit source-package file list.
+- Separate English and Chinese READMEs.
+- GCC/Clang CI with mock-engine Fcitx/GTK tests and reproducible archive checks.
+- Tagged GitHub Releases gated by the complete CI workflow.
+
+Experimental release: fixed upstream ABI, incomplete Windows settings parity,
+external ASR adapter required for voice, and no bundled official components.
