@@ -1,0 +1,126 @@
+From 3227f1582180cbe38e29f07976c8f3a544b4bb7e Mon Sep 17 00:00:00 2001
+From: dunova <dunova88@gmail.com>
+Date: Thu, 12 Nov 2026 10:22:17 +0800
+Subject: [PATCH 1/2] =?UTF-8?q?feat(dictation):=20=E5=86=85=E8=81=94?=
+ =?UTF-8?q?=E7=BB=84=E5=90=88=E5=8C=BA=E4=B8=8A=E5=B1=8F=E3=80=81=E5=90=AC?=
+ =?UTF-8?q?=E5=86=99=E7=9B=B4=E6=8E=A5=E6=8F=90=E4=BA=A4=E3=80=81=E4=B8=8D?=
+ =?UTF-8?q?=E8=AF=BB=E5=89=AA=E8=B4=B4=E6=9D=BF?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+本仓库是 xifan2333/fcitx5-vinput 的本地定制（GPLv3）。这三处与上游行为不同，
+是 DoubaoGO 方案的产品选择，不是上游功能：
+
+1. updateVoicePresentation 改用 ClientPreedit，把流式文字直接写进客户端输入框，
+   不再用悬浮候选条遮挡屏幕；不支持内联组合区的客户端回退到 setPreedit。
+2. 听写模式直接 commit 最终文本，不弹候选菜单——与豆包 IME / macOS 听写一致；
+   命令模式仍保留多候选选择。
+3. AcquireContextSelection 只取输入框内选区，不再回退读取剪贴板内容。
+
+上游基线: 5808fd0
+---
+ src/addon/dbus/vinput_dbus.cpp      | 51 ++++++++++++++++++++++-------
+ src/addon/input/vinput_keyevent.cpp |  8 ++---
+ 2 files changed, 43 insertions(+), 16 deletions(-)
+
+diff --git a/src/addon/dbus/vinput_dbus.cpp b/src/addon/dbus/vinput_dbus.cpp
+index c57d213..5e57bec 100644
+--- a/src/addon/dbus/vinput_dbus.cpp
++++ b/src/addon/dbus/vinput_dbus.cpp
+@@ -185,11 +185,14 @@ std::string LimitPreviewText(std::string_view text, int max_display_width) {
+ 
+ std::string ComposeLivePreedit(const std::string& transcript_text, const std::string& fallback_text,
+                                int max_display_width = 0) {
++  (void)max_display_width;
+   if (transcript_text.empty()) {
+     return fallback_text;
+   }
+ 
+-  return LimitPreviewText(transcript_text, max_display_width);
++  // Never fold or swallow spoken text into "head...tail" - streaming preedit flows
++  // directly into the client input box, which wraps naturally across multiple lines.
++  return transcript_text;
+ }
+ 
+ std::string RenderMethodCallFailure(std::string_view error_name, std::string_view error_message,
+@@ -774,11 +777,11 @@ void VinputEngine::onRecognitionResult(fcitx::dbus::Message& msg) {
+     }
+   }
+ 
+-  // Dictation presents every distinct choice: raw is option 1 and the primary LLM rewrite is
+-  // focused. Command mode keeps its existing behavior because its payload also contains the
+-  // selected text and spoken command as metadata candidates.
++  // In dictation mode, commit the polished text directly without popping up a candidate
++  // menu, matching Doubao IME / macOS Dictation behavior. Only command mode shows options
++  // if multiple distinct LLM candidates exist.
+   const bool should_show_result_menu =
+-      is_command ? distinct_llm_candidate_count > 1 : payload.candidates.size() > 1;
++      is_command && distinct_llm_candidate_count > 1;
+   if (should_show_result_menu) {
+     // Save command mode for result menu interaction
+     result_is_command_ = is_command;
+@@ -895,12 +898,38 @@ void VinputEngine::updateVoicePresentation(fcitx::InputContext* ic, const std::s
+     return;
+   }
+   dismissMenusForVoiceActivity();
+-  fcitx::Text preedit;
+-  preedit.append(preedit_text);
+-  fcitx::Text aux_down;
+-  aux_down.append(aux_down_text);
+-  ic->inputPanel().setPreedit(preedit);
+-  ic->inputPanel().setAuxDown(aux_down);
++
++  if (preedit_text.empty()) {
++    ic->inputPanel().setClientPreedit(fcitx::Text());
++    ic->inputPanel().setPreedit(fcitx::Text());
++    ic->inputPanel().setAuxDown(fcitx::Text());
++    ic->updatePreedit();
++    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
++    return;
++  }
++
++  // Stream text directly into the focused client input box (inline preedit).
++  // The client application (Antigravity, Chrome, Firefox, Omawrite, etc.) handles
++  // line wrapping naturally within its input area.
++  fcitx::Text client_preedit(preedit_text, fcitx::TextFormatFlags(fcitx::TextFormatFlag::Underline) |
++                                           fcitx::TextFormatFlag::DontCommit);
++  client_preedit.setCursor(preedit_text.size());
++  ic->inputPanel().setClientPreedit(client_preedit);
++
++  if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
++    // Fallback only for clients that lack inline preedit support
++    fcitx::Text preedit;
++    preedit.append(preedit_text);
++    fcitx::Text aux_down;
++    aux_down.append(aux_down_text);
++    ic->inputPanel().setPreedit(preedit);
++    ic->inputPanel().setAuxDown(aux_down);
++  } else {
++    // Clean, no floating candidate box spanning the screen!
++    ic->inputPanel().setPreedit(fcitx::Text());
++    ic->inputPanel().setAuxDown(fcitx::Text());
++  }
++
+   ic->updatePreedit();
+   ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+ }
+diff --git a/src/addon/input/vinput_keyevent.cpp b/src/addon/input/vinput_keyevent.cpp
+index 678f4c4..337f91a 100644
+--- a/src/addon/input/vinput_keyevent.cpp
++++ b/src/addon/input/vinput_keyevent.cpp
+@@ -88,11 +88,9 @@ std::string ExtractClipboardPrimary(fcitx::Instance* instance, fcitx::InputConte
+ }
+ 
+ std::string AcquireContextSelection(fcitx::Instance* instance, fcitx::InputContext* ic) {
+-  std::string selected_text = ExtractSurroundingSelection(ic);
+-  if (selected_text.empty()) {
+-    selected_text = ExtractClipboardPrimary(instance, ic);
+-  }
+-  return selected_text;
++  // Never read clipboard content without explicit user command!
++  // Only extract currently selected text in the active input context.
++  return ExtractSurroundingSelection(ic);
+ }
+ 
+ } // namespace

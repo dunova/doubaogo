@@ -1,0 +1,104 @@
+From d170a3a4cf5bc45701e3a6305ca35279c192fe57 Mon Sep 17 00:00:00 2001
+From: dunova <dunova88@gmail.com>
+Date: Thu, 12 Nov 2026 10:22:30 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?fix(dictation):=20=E7=BB=84=E5=90=88?=
+ =?UTF-8?q?=E5=8C=BA=E9=99=90=E9=95=BF=EF=BC=8C=E6=94=B6=E5=B0=BE=E9=98=B6?=
+ =?UTF-8?q?=E6=AE=B5=E4=B8=8D=E5=86=8D=E9=A1=B6=E6=8E=89=E5=B7=B2=E4=B8=8A?=
+ =?UTF-8?q?=E5=B1=8F=E6=96=87=E5=AD=97?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+本地定制把内联组合区改成「全文直写」，等于取消了上游的长度限制。受控编辑器
+（Slate / Lexical / ProseMirror）必须把浏览器组合区映射回自己的文档模型，
+一旦组合区跨过文本叶子或段落边界就抛
+"Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]"，
+宿主输入框渲染中断。这就是「短句没事、长句必崩」的成因——是组合区长度，
+不是输入框容量。
+
+- ComposeLivePreedit 只流式尾部 160 字符（TailPreeditText），完整转写文本
+  仍用于最终 commit，不再随说话时长增长
+- enterBusyState 在已有转写文本时，把「识别中／正在后处理」追加在文字之后，
+  而不是用状态行整体替换掉它
+- 与上游 head...tail 折叠的区别：只留尾部，不吞句子中间
+
+Verified: make -j (g++, C++20) 通过；ctest 47/47 通过
+---
+ src/addon/dbus/vinput_dbus.cpp | 50 +++++++++++++++++++++++++++++++---
+ 1 file changed, 46 insertions(+), 4 deletions(-)
+
+diff --git a/src/addon/dbus/vinput_dbus.cpp b/src/addon/dbus/vinput_dbus.cpp
+index 5e57bec..754e01a 100644
+--- a/src/addon/dbus/vinput_dbus.cpp
++++ b/src/addon/dbus/vinput_dbus.cpp
+@@ -183,6 +183,34 @@ std::string LimitPreviewText(std::string_view text, int max_display_width) {
+   return result;
+ }
+ 
++// Streaming dictation is injected into the client as a composition region. Slate,
++// Lexical and ProseMirror map that region back onto their own document model and can
++// only do so while it stays inside a single text leaf: once a long dictation grows the
++// region past a leaf or paragraph boundary they throw
++// "Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]" and the host
++// input box stops rendering. This is why short utterances are fine and long ones are
++// not - it is the length of the composition region, not the capacity of the text box.
++// Bound the region to the most recent speech, which is what the speaker is watching.
++constexpr size_t kMaxInlinePreeditChars = 160;
++
++std::string TailPreeditText(std::string_view text, size_t keep) {
++  std::u32string u32;
++  unicode::utf8::decode(text.data(), text.size(), u32);
++  if (u32.size() <= keep) {
++    return std::string(text);
++  }
++  constexpr std::string_view ellipsis = "...";
++  std::u32string ellipsis_u32;
++  unicode::utf8::decode(ellipsis.data(), ellipsis.size(), ellipsis_u32);
++  const std::u32string tail_u32 = u32.substr(u32.size() - keep);
++  std::string result;
++  unicode::utf8::encode(ellipsis_u32.data(), ellipsis_u32.size(), result);
++  std::string tail_str;
++  unicode::utf8::encode(tail_u32.data(), tail_u32.size(), tail_str);
++  result.append(tail_str);
++  return result;
++}
++
+ std::string ComposeLivePreedit(const std::string& transcript_text, const std::string& fallback_text,
+                                int max_display_width = 0) {
+   (void)max_display_width;
+@@ -190,9 +218,10 @@ std::string ComposeLivePreedit(const std::string& transcript_text, const std::st
+     return fallback_text;
+   }
+ 
+-  // Never fold or swallow spoken text into "head...tail" - streaming preedit flows
+-  // directly into the client input box, which wraps naturally across multiple lines.
+-  return transcript_text;
++  // Keep the whole utterance for the final commit, but only stream a bounded tail
++  // inline. Folding into "head...tail" hides the middle of the sentence; growing
++  // without a bound breaks controlled editors.
++  return TailPreeditText(transcript_text, kMaxInlinePreeditChars);
+ }
+ 
+ std::string RenderMethodCallFailure(std::string_view error_name, std::string_view error_message,
+@@ -507,7 +536,20 @@ void VinputEngine::enterBusyState(fcitx::InputContext* ic, bool command_mode,
+   session_->command_mode = command_mode;
+   session_->raw_prev = effective_raw_prev;
+   status_ic_ = ic;
+-  if (!session_->raw_prev) {
++  const bool has_transcript = !command_mode && !session_->transcript_text.empty();
++  if (has_transcript) {
++    // Dictation must never replace text that is already on screen with a bare
++    // status line. Both "... Recognizing ..." and "... Postprocessing ..." are
++    // appended behind the transcript instead of wiping it - replacing it is what
++    // made the text look deleted the moment the voice key was released.
++    const auto transcript =
++        TailPreeditText(session_->transcript_text, kMaxInlinePreeditChars);
++    updateVoicePresentation(ic, transcript + "  " + preedit_text,
++                            session_->raw_prev
++                                ? LimitPreviewText(session_->transcript_text,
++                                                   max_streaming_display_width_)
++                                : std::string{});
++  } else if (!session_->raw_prev) {
+     updateVoicePresentation(ic, preedit_text);
+   } else if (postprocessing && !session_->transcript_text.empty()) {
+     const auto transcript =

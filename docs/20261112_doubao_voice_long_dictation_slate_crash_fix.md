@@ -7,6 +7,28 @@
 
 ---
 
+## 〇、代码归属：哪些是上游的，哪些是我们的
+
+这次缺陷横跨两个仓库，先把边界钉死，避免把上游代码当成自研、或把自研决策当成上游行为。
+
+| 组件 | 位置 | 归属 |
+|---|---|---|
+| 语音采集、流式 ASR、**组合区渲染（崩溃点）** | `fcitx5-vinput` | 上游 [xifan2333/fcitx5-vinput](https://github.com/xifan2333/fcitx5-vinput)，GPL-3.0。我们只以补丁形式定制，见 `patches/fcitx5-vinput/` |
+| 「正在优化」这一步的整理调用 | `doubaoime` 适配器（`~/.local/share/vinput/adapters/`） | 外部适配器，来自 vinput-registry，由用户自备；本仓库只在 `THIRD_PARTY.md` 声明依赖，不分发 |
+| 录音协调、结果校验、整理提示、日志 | `bridge/`（`audio.py`、`daemon.py`、`organize.py`） | 本仓库，MIT |
+| 键盘引擎桥接 | `fcitx5/keyboard.cpp`、`bridge/keyboard_broker.py` | 本仓库，MIT |
+| 独立提交插件 `doubaovoice` | `fcitx5/voice.cpp` | 本仓库，MIT。当前链路旁待命，本文第三、四节记录的是它的同类修复 |
+
+因此对「这些功能是上游的还是我们自己写的」这个问题，答案是分层的：
+
+- **把组合区改成「全文直写」是我们的产品决策**（`0001` 补丁），上游原本会折叠成 `head…tail`；
+- **组合区失控后崩溃的渲染代码是上游的**，我们改不了宿主编辑器的断言，只能约束组合区长度；
+- **「正在优化」的文案属于上游插件的状态机，真正干活的整理接口是外部适配器**，本仓库负责编排与提示。
+
+补丁序列与应用方式见 `patches/fcitx5-vinput/README.md`。
+
+---
+
 ## 一、问题现象
 
 用户在使用豆包语音输入法（doubaogo 0.9.0）时报告两个缺陷：

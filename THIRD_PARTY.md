@@ -17,11 +17,18 @@ endorsed by ByteDance or Doubao. Users supply their own official installer.
 | [innoextract_win](https://github.com/UserUnknownFactor/innoextract_win/tree/e561d8cb6004776eecb3184c0d56b3534a0c7e15) | Extracts the Inno Setup 6.7 installer on Linux | Not bundled |
 | [rime-winime](https://github.com/xdqi/rime-winime/tree/641ea31c2e8966bdd040fb459d2d2607005fd04c) | Architectural reference for Windows engine bridging | No source copied; this project uses Doubao RPC instead of IMM |
 | [vinput-registry Doubao streaming adapter](https://github.com/xifan2333/vinput-registry/tree/38e203e328118e5575722d2d4dd74dd736b6c8d8/resources/providers/doubaoime/streaming) | Optional external ASR adapter | No adapter source, credentials or protocol implementation bundled |
+| [fcitx5-vinput](https://github.com/xifan2333/fcitx5-vinput/tree/5808fd0) | Optional dictation front-end (audio capture, streaming ASR, inline composition region) | Source not bundled. `patches/fcitx5-vinput/` carries our delta against upstream `5808fd0`, GPL-3.0 |
 
 The optional ASR adapter's separate redistribution permission has not been
 confirmed. This release only includes our launcher for an adapter supplied by
 the user; its code is not relicensed under MIT. The ASR protocol research and
 adapter implementation belong to their upstream contributors.
+
+The patch files under `patches/fcitx5-vinput/` are derived from GPL-3.0 code and
+are provided under GPL-3.0. They are not combined with, linked against, or
+relicensed under this repository's MIT grant; they only modify the upstream
+source tree at build time. Distributing binaries built from that tree carries the
+corresponding GPL-3.0 obligations.
 
 Other runtime/build dependencies (Python, PyGObject, GTK, json-c, Xvfb, libopus,
 PulseAudio client tools and system libraries) retain their respective licenses.
