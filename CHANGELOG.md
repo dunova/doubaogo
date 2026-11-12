@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.3 — 2026-11-12
+
+- **Dictation Stops Using the Client Composition Region Entirely**: 0.9.2 still painted a short composition region (the unsettled tail) inline. A thirty-character utterance reproduced the same `Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]` crash, which rules out length as the deciding factor — the composition region itself is what the host editor cannot survive at dictation speed. Dictation now never creates one: settled speech is inserted with `commitString()`, the same plain-text path as keyboard typing.
+- **Status Hint Moved Out of the Client DOM**: `识别中 / 正在后处理` is shown in the input method's own aux window, which is not part of the client document and therefore never enters the editor's node mapping.
+- **Progressive Insert Kept**: the last 8 characters are held back so the recognizer can still revise them; once 16 characters are waiting the text is handed over even mid-sentence, so long dictation never accumulates.
+- **Command Mode Unchanged**: 划词指令 keeps its candidate menu and inline composition behaviour.
+
 ## 0.9.2 — 2026-11-12
 
 - **Dictation Never Hides What You Said (replaces the 0.9.1 tail window)**: 0.9.1 kept only a 160-character tail of the running transcript in the composition region, so a long dictation showed `...` plus the last few words and the speaker could no longer read what had already been said. That traded away the user's own text to avoid a crash — the wrong trade. Finished sentences are now handed to the client as ordinary document text (`commitString`) and only the words still being revised stay in the composition region.

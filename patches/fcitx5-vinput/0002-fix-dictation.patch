@@ -1,40 +1,38 @@
-From 99f12f3d70638da18829a3d863080c0b2c4cd825 Mon Sep 17 00:00:00 2001
+From 82267005698976a94be3abf0153021e2036a0edd Mon Sep 17 00:00:00 2001
 From: dunova <dunova88@gmail.com>
 Date: Thu, 12 Nov 2026 11:00:11 +0800
-Subject: [PATCH 2/2] =?UTF-8?q?fix(dictation):=20=E9=80=90=E5=8F=A5?=
- =?UTF-8?q?=E8=90=BD=E5=AE=9A=E4=BB=A3=E6=9B=BF=E6=88=AA=E6=96=AD=EF=BC=8C?=
- =?UTF-8?q?=E5=85=A8=E6=96=87=E5=8F=AF=E8=A7=81=E4=B8=94=E7=BB=84=E5=90=88?=
- =?UTF-8?q?=E5=8C=BA=E4=B8=8D=E4=BC=9A=E5=A4=B1=E6=8E=A7?=
+Subject: [PATCH 2/2] =?UTF-8?q?fix(dictation):=20=E4=B8=8D=E5=86=8D?=
+ =?UTF-8?q?=E4=BD=BF=E7=94=A8=E5=AE=A2=E6=88=B7=E7=AB=AF=E7=BB=84=E5=90=88?=
+ =?UTF-8?q?=E5=8C=BA=EF=BC=8C=E9=80=90=E5=8F=A5=20commitString=20=E4=B8=8A?=
+ =?UTF-8?q?=E5=B1=8F?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-受控编辑器（Slate / Lexical / ProseMirror）只能把仍然落在同一个文本叶子内的组合区
-映射回文档模型，长听写的组合区越界即抛
-"Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]"，宿主输入框
-渲染中断。
+证据推翻了"长度"假设：一句三十来字的短听写同样复现
+"Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]"。决定因素是
+**组合区本身**，不是它的长度——受控编辑器（Slate 等）在每次 composition 更新时都要
+把组合区重新映射回自己的模型，听写这个速率下它解析到的节点已被下一次更新替换，于是
+抛断言。缩到 160 字、缩到 12 字、还是折叠成 head…tail，都只是降低触发概率。
 
-之前的做法是把可见文字截成尾部窗口（甚至 head...tail），等于为了不崩就不让人看见
-自己说了什么——这是错的。改为一句话说完就把它当正文交出去（commitString），只有
-正在说、还可能被改写的十几个字留在组合区：
+因此听写彻底不再创建组合区：
 
-- 新增 Session::committed_text 记录已落定内容，重复提交会被挡住
-- advanceStableCommit 按句读边界推进，永远保留尾部 12 字可改写；
-  整句无标点时用 kMaxCompositionChars=48 兜底硬切，组合区长度有界
-- 组合区只画未落定的尾巴（PendingPreeditText），不再折叠、不再出现省略号
-- 收尾阶段把「识别中／正在后处理」追加在未落定的尾巴之后
-- 最终提交只补未落定的部分；若润色结果改写了已落定的文字，则退回原文尾部，
-  宁可少润色也不重复上屏
+- updateVoicePresentation 在听写模式下一律不设 ClientPreedit/Preedit；状态提示
+  走输入法自己的 aux 窗口（不属于客户端 DOM），不参与编辑器的节点映射
+- advanceStableCommit 用 commitString() 把已说完的文字直接插入，与键盘打字走同一
+  路径，不产生 composition
+- 保留尾部 8 字不落定（可被识别结果改写）；待落定超过 16 字即切，长句也不会积压
+- Session::committed_text 防重复上屏；最终提交只补未落定部分
+- 命令模式（划词指令）保持原有候选菜单与组合区行为，不受影响
 
-效果：屏幕上始终是完整、连续、按顺序的真实文字；组合区恒定很短，编辑器不再崩；
-已落定的文字不参与重绘，流式不再"一蹦一蹦"。
+代价与取舍：说话过程中屏幕上出现的是"已落定的真实文字"，最后几个字要等它稳定后才
+出现（约几百毫秒）；换来的是编辑器不再崩、也不再有逐字闪烁。
 
-Verified: make -j 通过；ctest 47/47 通过；切分逻辑独立验证（汉字边界、无标点兜底、
-流式全程组合区 <= 24 字）
+Verified: make -j 通过；ctest 47/47 通过
 ---
  src/addon/core/vinput.h        |   6 +
- src/addon/dbus/vinput_dbus.cpp | 247 ++++++++++++++++++++++++++++++---
- 2 files changed, 234 insertions(+), 19 deletions(-)
+ src/addon/dbus/vinput_dbus.cpp | 268 ++++++++++++++++++++++++++++++---
+ 2 files changed, 255 insertions(+), 19 deletions(-)
 
 diff --git a/src/addon/core/vinput.h b/src/addon/core/vinput.h
 index 851450a..00d1b95 100644
@@ -61,7 +59,7 @@ index 851450a..00d1b95 100644
    };
    std::optional<Session> session_;
 diff --git a/src/addon/dbus/vinput_dbus.cpp b/src/addon/dbus/vinput_dbus.cpp
-index 5e57bec..03d58cc 100644
+index 5e57bec..341fb4d 100644
 --- a/src/addon/dbus/vinput_dbus.cpp
 +++ b/src/addon/dbus/vinput_dbus.cpp
 @@ -183,16 +183,134 @@ std::string LimitPreviewText(std::string_view text, int max_display_width) {
@@ -85,11 +83,11 @@ index 5e57bec..03d58cc 100644
 +// screen, in order, as real text; the composition region never grows, so controlled
 +// editors never break. It is also what makes streaming feel instant: committed text is
 +// not re-rendered on every partial result.
-+constexpr size_t kStableTailChars = 12;
-+// Hard ceiling: even inside one long unpunctuated sentence the composition region must
-+// not grow without bound. Splitting there is invisible to the speaker - committed and
-+// uncommitted text read as one continuous paragraph either way.
-+constexpr size_t kMaxCompositionChars = 48;
++constexpr size_t kStableTailChars = 8;
++// Nothing is painted into the client any more, so the only reason to hold text back is
++// that the recognizer may still revise the newest words. Once that much is waiting, hand
++// it over - a mid-sentence split is invisible to the speaker, the text simply continues.
++constexpr size_t kMaxPendingChars = 16;
 +
 +bool IsClauseBoundary(char32_t c) {
 +  switch (c) {
@@ -181,7 +179,7 @@ index 5e57bec..03d58cc 100644
 +  while (committed_cps < total && cp_starts[committed_cps] < committed_bytes) {
 +    ++committed_cps;
 +  }
-+  if (total - committed_cps > kMaxCompositionChars) {
++  if (total - committed_cps > kMaxPendingChars) {
 +    const size_t cut = total - kStableTailChars;
 +    if (cut > committed_cps) {
 +      return cp_starts[cut];
@@ -317,7 +315,7 @@ index 5e57bec..03d58cc 100644
    if (session.phase == Session::Phase::Postprocessing) {
      enterBusyState(ic, session.command_mode,
                     PostprocessingPreeditText(session.command_mode, session.raw_prev), true,
-@@ -842,10 +1004,57 @@ void VinputEngine::handleRecognitionPartial(const std::string& transcript_text)
+@@ -842,10 +1004,52 @@ void VinputEngine::handleRecognitionPartial(const std::string& transcript_text)
      return;
    }
  
@@ -340,12 +338,7 @@ index 5e57bec..03d58cc 100644
 +    return;
 +  }
 +  auto& session = *session_;
-+  if (session.command_mode || !session.raw_prev) {
-+    return;
-+  }
-+  if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
-+    // Clients that cannot host an inline composition region keep the preview in the
-+    // candidate window, so there is nothing to shorten here.
++  if (session.command_mode) {
 +    return;
 +  }
 +
@@ -378,3 +371,36 @@ index 5e57bec..03d58cc 100644
  }
  
  void VinputEngine::onStatusChanged(fcitx::dbus::Message& msg) {
+@@ -899,6 +1103,32 @@ void VinputEngine::updateVoicePresentation(fcitx::InputContext* ic, const std::s
+   }
+   dismissMenusForVoiceActivity();
+ 
++  // Dictation never uses the client composition region.
++  //
++  // The host editor in question (Slate, and the same class of controlled editors) keeps
++  // its own model of the DOM and re-resolves the composing node on every composition
++  // update. Writing a composition region at dictation speed makes it resolve a node that
++  // the next update already replaced, and it throws
++  // "Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]".
++  // The length of that region is NOT the deciding factor - a thirty character utterance
++  // reproduces it. So the region is not used at all: settled speech is delivered with
++  // commitString(), which is the same plain text insertion path as typing on the keyboard
++  // and never creates a composition. The status hint goes to the input method's own aux
++  // window, which is not part of the client DOM.
++  const bool inline_preedit = !(session_.has_value() && !session_->command_mode);
++  if (!inline_preedit) {
++    ic->inputPanel().setClientPreedit(fcitx::Text());
++    ic->inputPanel().setPreedit(fcitx::Text());
++    fcitx::Text aux;
++    if (!preedit_text.empty() && (!session_.has_value() || session_->transcript_text.empty())) {
++      aux.append(preedit_text);
++    }
++    ic->inputPanel().setAuxDown(aux);
++    ic->updatePreedit();
++    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
++    return;
++  }
++
+   if (preedit_text.empty()) {
+     ic->inputPanel().setClientPreedit(fcitx::Text());
+     ic->inputPanel().setPreedit(fcitx::Text());
