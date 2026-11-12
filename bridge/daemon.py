@@ -146,7 +146,15 @@ class Bridge:
             except GLib.Error:
                 self.cancel('fcitx-unavailable')
         elif kind == 'organizing' and self.phase == 'processing':
-            self.notify('正在整理…Esc 可取消，请等待“已输入”提示')
+            # Append the status hint after the text already on screen. Never
+            # clear the composition region here: the transcript is final and
+            # the user must keep seeing it until the polished text lands.
+            try:
+                if self.token:
+                    self.fcitx('Note', self.token, '  ·  正在优化…')
+            except GLib.Error:
+                pass
+            self.notify('正在优化…Esc 可取消，请等待“已输入”提示')
         elif kind == 'recording' and self.phase == 'connecting':
             self.phase, self.since = 'recording', time.monotonic()
             self.notify('可以说话了；松开右 Alt 或再按右 Alt + 空格结束，Esc 取消'

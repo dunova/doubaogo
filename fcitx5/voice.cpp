@@ -21,6 +21,9 @@ FCITX_CONFIGURATION(VoiceConfig,
     fcitx::Option<bool> hotkeys{this, "EnableHotkeys", "Enable Right Alt voice shortcuts", false};
     fcitx::Option<int, fcitx::IntConstrain> holdMs{this, "HoldThresholdMs", "Hold threshold (ms)",
                                                 250, fcitx::IntConstrain(100, 2000)};
+    fcitx::Option<int, fcitx::IntConstrain> previewChars{this, "MaxPreviewChars",
+                                                "Inline preview limit (characters)",
+                                                120, fcitx::IntConstrain(20, 2000)};
 );
 
 // Doubao's audio process receives a single-use capability for the focused field.
@@ -31,7 +34,9 @@ class Dictation final : public fcitx::AddonInstance,
         std::string ticket, sender;
         fcitx::TrackableObjectReference<fcitx::InputContext> field;
         std::chrono::steady_clock::time_point expires;
+        std::string shown;
         bool preview = false;
+        bool finishing = false;
     };
     fcitx::Instance *instance;
     std::unique_ptr<Delivery> pending;
@@ -124,6 +129,57 @@ class Dictation final : public fcitx::AddonInstance,
         for (unsigned char byte : text) if ((byte < 32 && !(multiline && byte == '\n')) || byte == 127) return false;
         return true;
     }
+    static int characters(const std::string &text) {
+        int total = 0;
+        for (unsigned char byte : text) if ((byte & 0xC0) != 0x80) ++total;
+        return total;
+    }
+    static std::string tailChars(const std::string &text, int keep) {
+        if (keep <= 0) return text;
+        int total = 0;
+        for (unsigned char byte : text) if ((byte & 0xC0) != 0x80) ++total;
+        if (total <= keep) return text;
+        int skip = total - keep, seen = 0;
+        for (size_t i = 0; i < text.size(); ++i) {
+            if ((static_cast<unsigned char>(text[i]) & 0xC0) == 0x80) continue;
+            if (seen++ == skip) return text.substr(i);
+        }
+        return text;
+    }
+    // The composition region length decides whether a controlled editor
+    // (Slate / Lexical / ProseMirror) can still map the browser composition
+    // back onto its own document model. Once the region grows past a text leaf
+    // or a paragraph boundary, the editor throws
+    // "Cannot resolve a Slate node from DOM node" and its render tree breaks.
+    // So only a bounded tail is streamed inline; the full transcript stays in
+    // `shown` and is delivered by commit() in a single shot.
+    void render(const std::string &text, const std::string &suffix) {
+        auto *field = pending->field.get();
+        if (!field) return;
+        pending->shown = text;
+        int total = characters(text), keep = *config.previewChars;
+        std::string body = tailChars(text, keep);
+        if (total > keep) body.insert(0, "…");
+        if (suffix.empty() && total > keep) body += "（已说 " + std::to_string(total) + " 字）";
+        body += suffix;
+        if (body.empty()) return;
+        fcitx::Text preedit(body, fcitx::TextFormatFlags(fcitx::TextFormatFlag::Underline) |
+                                  fcitx::TextFormatFlag::DontCommit);
+        preedit.setCursor(body.size());
+        pending->preview = true;
+        // Exactly one render channel. Setting both makes the same string drive
+        // the in-app inline composition and the Fcitx panel at once, doubling
+        // DOM churn against the editor that is already struggling to keep up.
+        if (field->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
+            field->inputPanel().setClientPreedit(preedit);
+            field->inputPanel().setPreedit(fcitx::Text());
+        } else {
+            field->inputPanel().setPreedit(preedit);
+            field->inputPanel().setClientPreedit(fcitx::Text());
+        }
+        field->updatePreedit();
+        field->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+    }
     void clearPreview(Delivery &delivery) {
         auto *field = delivery.field.get();
         if (!delivery.preview || !field) return;
@@ -154,7 +210,15 @@ class Dictation final : public fcitx::AddonInstance,
         case fcitx::EventType::InputContextKeyEvent: {
             auto &key = static_cast<fcitx::KeyEvent &>(event);
             if (key.isRelease() || key.key().isModifier()) return;
-            if (key.key().sym() == FcitxKey_Escape) key.filterAndAccept();
+            if (key.key().sym() == FcitxKey_Escape) {
+                key.filterAndAccept();
+                revoke("typing");
+                break;
+            }
+            // Once the transcript is final and being polished, a stray key no
+            // longer means "abandon": throwing the result away here is exactly
+            // the "my text vanished when I released the voice key" report.
+            if (pending->finishing) return;
             revoke("typing");
             break;
         }
@@ -234,23 +298,27 @@ public:
         return true;
     }
     bool preview(const std::string &ticket, const std::string &text) {
-        if (!valid(ticket) || !safeText(text)) return false;
-        auto *field = pending->field.get();
-        fcitx::Text preedit(text, fcitx::TextFormatFlags(fcitx::TextFormatFlag::Underline) |
-                                  fcitx::TextFormatFlag::DontCommit);
-        preedit.setCursor(text.size());
-        pending->preview = true;
-        field->inputPanel().setClientPreedit(preedit);
-        field->inputPanel().setPreedit(preedit);
-        field->updatePreedit();
-        field->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+        // An empty preview would silently wipe the composition region that is
+        // already on screen. Refuse it: only commit/cancel may clear.
+        if (text.empty() || !valid(ticket) || !safeText(text)) return false;
+        pending->finishing = false;
+        render(text, {});
+        return true;
+    }
+    // Keep the streamed text visible and only append a status hint, instead of
+    // clearing the field and showing "optimising" alone.
+    bool note(const std::string &ticket, const std::string &suffix) {
+        if (!valid(ticket) || !safeText(suffix)) return false;
+        pending->finishing = true;
+        if (pending->shown.empty()) return true;
+        std::string current = pending->shown;
+        render(current, suffix);
         return true;
     }
     bool commit(const std::string &ticket, const std::string &text) {
         if (!owned(ticket)) return false;
         bool accepted = valid(ticket) && !text.empty() && safeText(text, true);
         auto delivery = std::move(pending);
-        clearPreview(*delivery);
         if (accepted) {
             auto *field = delivery->field.get();
             std::string output = text;
@@ -258,8 +326,13 @@ public:
                 field->capabilityFlags().test(fcitx::CapabilityFlag::Terminal)) {
                 for (char &c : output) if (c == '\n') c = ' ';
             }
+            // Commit first, collapse the composition second. The reverse order
+            // exposes one frame where the composition is gone but the text has
+            // not landed yet - the exact frame in which a controlled editor
+            // tries to resolve the node that just disappeared and throws.
             field->commitString(output);
         }
+        clearPreview(*delivery);
         return accepted;
     }
     FCITX_OBJECT_VTABLE_METHOD(begin, "Begin", "", "s");
@@ -267,6 +340,7 @@ public:
     FCITX_OBJECT_VTABLE_METHOD(valid, "Valid", "s", "b");
     FCITX_OBJECT_VTABLE_METHOD(cancel, "Cancel", "s", "b");
     FCITX_OBJECT_VTABLE_METHOD(preview, "Preview", "ss", "b");
+    FCITX_OBJECT_VTABLE_METHOD(note, "Note", "ss", "b");
     FCITX_OBJECT_VTABLE_METHOD(commit, "Commit", "ss", "b");
     FCITX_OBJECT_VTABLE_SIGNAL(invalidated, "Invalidated", "ss");
     FCITX_OBJECT_VTABLE_SIGNAL(shortcut, "Shortcut", "ss");

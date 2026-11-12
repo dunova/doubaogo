@@ -131,9 +131,16 @@ class Session:
                 result.receive(event)
                 if kind in ('partial', 'final', 'final_timestamps') and not result.error and not self.cancel.is_set():
                     text = event.get('text')
-                    if (isinstance(text, str) and len(text.encode()) <= 65536
+                    # Never forward an empty transcript: it would wipe the
+                    # composition region that is already visible on screen.
+                    if (isinstance(text, str) and text and len(text.encode()) <= 65536
                             and not any(ord(char) < 32 or ord(char) == 127 for char in text)
-                            and text != last_preview):
+                            and text != last_preview
+                            # The adapter contract is cumulative. A shorter event
+                            # is a late per-segment result, not a correction: if
+                            # it were painted, the text the user already sees
+                            # would visibly shrink or vanish.
+                            and not (last_preview and len(text) < len(last_preview) * 0.9)):
                         last_preview = text
                         self.callback('preview', {'text': text})
                 if event.get('type') == 'session_started':

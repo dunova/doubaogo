@@ -107,8 +107,22 @@ class BufferedAudio(unittest.IsolatedAsyncioTestCase):
         self.provider.close(0)
         with patch('audio.asyncio.create_subprocess_exec',side_effect=self.spawn):
             outcome=await self.session.run()
-        self.assertEqual([p['text'] for k,p in events if k=='preview'],['初步','修订','','下一句'])
+        # An empty transcript must never reach Preview: painting it would wipe
+        # the composition region the user is already looking at.
+        self.assertEqual([p['text'] for k,p in events if k=='preview'],['初步','修订','下一句'])
         self.assertIsNone(outcome['text'])
+
+    async def test_shrinking_stream_does_not_erase_visible_preview(self):
+        events=[]
+        self.session.callback=lambda kind,payload: events.append((kind,payload))
+        for text in ('第一句话的内容','第一句','第一句话的内容和第二部分'):
+            self.provider.emit({'type':'partial','text':text})
+        self.provider.emit({'type':'closed'})
+        self.provider.close(0)
+        with patch('audio.asyncio.create_subprocess_exec',side_effect=self.spawn):
+            await self.session.run()
+        self.assertEqual([p['text'] for k,p in events if k=='preview'],
+                         ['第一句话的内容','第一句话的内容和第二部分'])
 
     async def test_cancellation_suppresses_queued_preview(self):
         events=[]

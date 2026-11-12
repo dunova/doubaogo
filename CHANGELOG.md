@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Bounded Inline Dictation Preview (host-editor crash fix)**: Streaming dictation used to re-send the entire accumulated transcript as the ClientPreedit composition on every partial result. Once the composition grew past a text leaf or paragraph boundary, controlled editors (Slate, Lexical, ProseMirror) could no longer map it back onto their document model and threw `Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]`, breaking the host input box. The preview is now capped to a UTF-8-safe tail window (new `MaxPreviewChars` option, default 120) while the full transcript is delivered in one shot at commit. Long dictation no longer correlates with host-side render failures.
+- **Single Preedit Render Channel**: `Preview` no longer sets `setClientPreedit()` and `setPreedit()` at the same time. Exactly one channel is used, chosen from `CapabilityFlag::Preedit`, halving DOM churn against the host editor.
+- **No Blank Frame On Commit**: `Commit` now inserts the text first and collapses the composition second. The previous order exposed one frame where the composition was gone but the text had not landed — the frame in which a controlled editor resolves a node that no longer exists.
+- **Optimising Hint Appends Instead Of Wiping**: New `Note` D-Bus method keeps the streamed text on screen and appends `· 正在优化…` after it. Previously the composition region was cleared and the user lost sight of what had already been dictated.
+- **Empty / Shrinking Transcripts Never Repaint**: Empty recognition results are no longer forwarded as previews, and a result that is materially shorter than what is already displayed (a late per-segment result during shutdown) is ignored instead of shrinking the visible text.
+
 ## 0.9.0 — 2026-11-11
 
 - **Product Rebranding to doubaogo**: Officially rebranded from `doubao-ime-linux` to `doubaogo`, elevating Linux input method standards with modern UI, sleek documentation, and zero-compromise input performance.
