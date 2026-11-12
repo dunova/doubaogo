@@ -4,6 +4,12 @@
 - **组件**：`fcitx5/voice.cpp`、`bridge/audio.py`、`bridge/daemon.py`
 - **影响范围**：所有使用 ClientPreedit 流式上屏的宿主应用，尤其是基于 Slate / Lexical / ProseMirror 等受控编辑器的网页与 Electron 应用
 - **状态**：已修复，源码编译与单元测试全绿
+- **修订（2026-11-12 11:00，v0.9.2）**：本文原先采用的「尾部窗口 + `…` 折叠」方案**已废弃**。
+  把可见文字截断，等于为了绕开宿主编辑器的报错而让说话人看不见自己刚说的内容——这是
+  错的取舍。现行方案是**逐句落定**：说完的句子直接 `commitString` 成正文，只有仍在改写
+  的尾部留在组合区（详见 `patches/fcitx5-vinput/0002-fix-dictation.patch`）。本文描述
+  的 `voice.cpp` 侧 `MaxPreviewChars` 截断实现属于同一思路，`doubaovoice` 插件当前待命
+  未上链路，移植时按逐句落定改写，不要再保留截断。
 
 ---
 
