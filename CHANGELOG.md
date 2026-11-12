@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.4 — 2026-11-12
+
+- **Reverted 0.9.3: dictation shows what you are saying again.** 0.9.3 stopped creating a client composition region and inserted text only once a sentence settled. It removed the crash but also removed the live feedback: during speech the input box stayed empty and whole sentences appeared one at a time, so the speaker could not read what they had just said. That is a regression, not a fix, and it is withdrawn.
+- **Back to the 0.9.2 rendering path**: settled sentences are `commitString`'d as normal document text, and the composition region carries only the short unsettled tail, so text is visible continuously, in order, with no ellipsis and no truncation.
+- **Policy written into the patch README**: any dictation change that hides the speaker's own text is rejected regardless of whether it removes the crash. Both rejected routes (0.9.1 truncation, 0.9.3 no-composition) are recorded there so they are not retried.
+- **The crash is the host editor's**: `Cannot resolve a Slate node from DOM node` is thrown by the Slate editor inside the application, not by the input method — the string exists in the host bundle and appears nowhere in `fcitx5-vinput.so`. What remains on our side is to keep the composition region short and to report the editor defect to its owner.
+
 ## 0.9.3 — 2026-11-12
 
 - **Dictation Stops Using the Client Composition Region Entirely**: 0.9.2 still painted a short composition region (the unsettled tail) inline. A thirty-character utterance reproduced the same `Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]` crash, which rules out length as the deciding factor — the composition region itself is what the host editor cannot survive at dictation speed. Dictation now never creates one: settled speech is inserted with `commitString()`, the same plain-text path as keyboard typing.
