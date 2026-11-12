@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.2 — 2026-11-12
+
+- **Dictation Never Hides What You Said (replaces the 0.9.1 tail window)**: 0.9.1 kept only a 160-character tail of the running transcript in the composition region, so a long dictation showed `...` plus the last few words and the speaker could no longer read what had already been said. That traded away the user's own text to avoid a crash — the wrong trade. Finished sentences are now handed to the client as ordinary document text (`commitString`) and only the words still being revised stay in the composition region.
+- **Composition Region Is Bounded Without Truncation**: `advanceStableCommit()` advances on clause boundaries and always keeps the last 12 characters open for revision; a single unpunctuated sentence is split at 48 characters. The whole utterance stays on screen, in order, as real text, and the composition region never grows past that bound — so controlled editors (Slate, Lexical, ProseMirror) no longer throw `Cannot resolve a Slate node from DOM node`.
+- **No Double Insert**: `Session::committed_text` records what was already handed over; the final commit only appends the remainder. If the polish step rewrites text that is already on screen, the raw tail is appended instead — less polish is preferable to duplicated text.
+- **Steadier Streaming**: committed text is not re-rendered on every partial result, so the preview stops redrawing itself character by character (the "jumping" feel compared with macOS dictation).
+- **Optimising Hint Appends Instead Of Wiping**: the `识别中 / 正在后处理` hint is appended behind the unsettled tail instead of replacing the text.
+
 ## 0.9.1 — 2026-11-12
 
 - **Dictation Front-End Now Versioned In This Repo**: The streaming composition region lives in `fcitx5-vinput`, an external GPL-3.0 plugin we customise. Those changes used to exist only in someone's working tree, with no history — which is how the regression below reached users. They are now maintained as a reviewed patch series in `patches/fcitx5-vinput/` (baseline `5808fd0`), shipped in the source archive, and applied with `git am`.

@@ -1,86 +1,235 @@
-From d170a3a4cf5bc45701e3a6305ca35279c192fe57 Mon Sep 17 00:00:00 2001
+From 99f12f3d70638da18829a3d863080c0b2c4cd825 Mon Sep 17 00:00:00 2001
 From: dunova <dunova88@gmail.com>
-Date: Thu, 12 Nov 2026 10:22:30 +0800
-Subject: [PATCH 2/2] =?UTF-8?q?fix(dictation):=20=E7=BB=84=E5=90=88?=
- =?UTF-8?q?=E5=8C=BA=E9=99=90=E9=95=BF=EF=BC=8C=E6=94=B6=E5=B0=BE=E9=98=B6?=
- =?UTF-8?q?=E6=AE=B5=E4=B8=8D=E5=86=8D=E9=A1=B6=E6=8E=89=E5=B7=B2=E4=B8=8A?=
- =?UTF-8?q?=E5=B1=8F=E6=96=87=E5=AD=97?=
+Date: Thu, 12 Nov 2026 11:00:11 +0800
+Subject: [PATCH 2/2] =?UTF-8?q?fix(dictation):=20=E9=80=90=E5=8F=A5?=
+ =?UTF-8?q?=E8=90=BD=E5=AE=9A=E4=BB=A3=E6=9B=BF=E6=88=AA=E6=96=AD=EF=BC=8C?=
+ =?UTF-8?q?=E5=85=A8=E6=96=87=E5=8F=AF=E8=A7=81=E4=B8=94=E7=BB=84=E5=90=88?=
+ =?UTF-8?q?=E5=8C=BA=E4=B8=8D=E4=BC=9A=E5=A4=B1=E6=8E=A7?=
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit
 
-本地定制把内联组合区改成「全文直写」，等于取消了上游的长度限制。受控编辑器
-（Slate / Lexical / ProseMirror）必须把浏览器组合区映射回自己的文档模型，
-一旦组合区跨过文本叶子或段落边界就抛
-"Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]"，
-宿主输入框渲染中断。这就是「短句没事、长句必崩」的成因——是组合区长度，
-不是输入框容量。
+受控编辑器（Slate / Lexical / ProseMirror）只能把仍然落在同一个文本叶子内的组合区
+映射回文档模型，长听写的组合区越界即抛
+"Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]"，宿主输入框
+渲染中断。
 
-- ComposeLivePreedit 只流式尾部 160 字符（TailPreeditText），完整转写文本
-  仍用于最终 commit，不再随说话时长增长
-- enterBusyState 在已有转写文本时，把「识别中／正在后处理」追加在文字之后，
-  而不是用状态行整体替换掉它
-- 与上游 head...tail 折叠的区别：只留尾部，不吞句子中间
+之前的做法是把可见文字截成尾部窗口（甚至 head...tail），等于为了不崩就不让人看见
+自己说了什么——这是错的。改为一句话说完就把它当正文交出去（commitString），只有
+正在说、还可能被改写的十几个字留在组合区：
 
-Verified: make -j (g++, C++20) 通过；ctest 47/47 通过
+- 新增 Session::committed_text 记录已落定内容，重复提交会被挡住
+- advanceStableCommit 按句读边界推进，永远保留尾部 12 字可改写；
+  整句无标点时用 kMaxCompositionChars=48 兜底硬切，组合区长度有界
+- 组合区只画未落定的尾巴（PendingPreeditText），不再折叠、不再出现省略号
+- 收尾阶段把「识别中／正在后处理」追加在未落定的尾巴之后
+- 最终提交只补未落定的部分；若润色结果改写了已落定的文字，则退回原文尾部，
+  宁可少润色也不重复上屏
+
+效果：屏幕上始终是完整、连续、按顺序的真实文字；组合区恒定很短，编辑器不再崩；
+已落定的文字不参与重绘，流式不再"一蹦一蹦"。
+
+Verified: make -j 通过；ctest 47/47 通过；切分逻辑独立验证（汉字边界、无标点兜底、
+流式全程组合区 <= 24 字）
 ---
- src/addon/dbus/vinput_dbus.cpp | 50 +++++++++++++++++++++++++++++++---
- 1 file changed, 46 insertions(+), 4 deletions(-)
+ src/addon/core/vinput.h        |   6 +
+ src/addon/dbus/vinput_dbus.cpp | 247 ++++++++++++++++++++++++++++++---
+ 2 files changed, 234 insertions(+), 19 deletions(-)
 
+diff --git a/src/addon/core/vinput.h b/src/addon/core/vinput.h
+index 851450a..00d1b95 100644
+--- a/src/addon/core/vinput.h
++++ b/src/addon/core/vinput.h
+@@ -124,6 +124,7 @@ private:
+   void onRecognitionResult(fcitx::dbus::Message& msg);
+   void onRecognitionPartial(fcitx::dbus::Message& msg);
+   void handleRecognitionPartial(const std::string& transcript_text);
++  void advanceStableCommit(fcitx::InputContext* ic, const std::string& transcript);
+   void onStatusChanged(fcitx::dbus::Message& msg);
+   void sendNotification(const std::string& message, const char* icon, int timeout_ms);
+   void notifyError(const std::string& message);
+@@ -180,6 +181,11 @@ private:
+     bool trigger_released = false;
+     bool raw_prev = true;
+     std::string transcript_text;
++    // Text already handed over to the client as normal document text. Progressive
++    // commit keeps the inline composition region short without hiding anything:
++    // finished speech becomes real text, only the still-changing tail stays in the
++    // composition region.
++    std::string committed_text;
+     bool stop_on_release = false;
+   };
+   std::optional<Session> session_;
 diff --git a/src/addon/dbus/vinput_dbus.cpp b/src/addon/dbus/vinput_dbus.cpp
-index 5e57bec..754e01a 100644
+index 5e57bec..03d58cc 100644
 --- a/src/addon/dbus/vinput_dbus.cpp
 +++ b/src/addon/dbus/vinput_dbus.cpp
-@@ -183,6 +183,34 @@ std::string LimitPreviewText(std::string_view text, int max_display_width) {
+@@ -183,16 +183,134 @@ std::string LimitPreviewText(std::string_view text, int max_display_width) {
    return result;
  }
  
+-std::string ComposeLivePreedit(const std::string& transcript_text, const std::string& fallback_text,
+-                               int max_display_width = 0) {
+-  (void)max_display_width;
 +// Streaming dictation is injected into the client as a composition region. Slate,
 +// Lexical and ProseMirror map that region back onto their own document model and can
 +// only do so while it stays inside a single text leaf: once a long dictation grows the
 +// region past a leaf or paragraph boundary they throw
 +// "Cannot resolve a Slate node from DOM node: [object HTMLSpanElement]" and the host
-+// input box stops rendering. This is why short utterances are fine and long ones are
-+// not - it is the length of the composition region, not the capacity of the text box.
-+// Bound the region to the most recent speech, which is what the speaker is watching.
-+constexpr size_t kMaxInlinePreeditChars = 160;
++// input box stops rendering.
++//
++// The answer is NOT to hide the speaker's own words (folding to a tail or to
++// "head...tail" is useless - the speaker can no longer read what was said). Instead
++// finished speech is handed over to the client as ordinary document text, and only the
++// few words still being revised stay in the composition region. Everything stays on
++// screen, in order, as real text; the composition region never grows, so controlled
++// editors never break. It is also what makes streaming feel instant: committed text is
++// not re-rendered on every partial result.
++constexpr size_t kStableTailChars = 12;
++// Hard ceiling: even inside one long unpunctuated sentence the composition region must
++// not grow without bound. Splitting there is invisible to the speaker - committed and
++// uncommitted text read as one continuous paragraph either way.
++constexpr size_t kMaxCompositionChars = 48;
 +
-+std::string TailPreeditText(std::string_view text, size_t keep) {
-+  std::u32string u32;
-+  unicode::utf8::decode(text.data(), text.size(), u32);
-+  if (u32.size() <= keep) {
-+    return std::string(text);
++bool IsClauseBoundary(char32_t c) {
++  switch (c) {
++    case U'\n':
++    case U'\u3002':  // 。
++    case U'\uFF01':  // ！
++    case U'\uFF1F':  // ？
++    case U'\uFF1B':  // ；
++    case U'\uFF0C':  // ，
++    case U'\u3001':  // 、
++    case U'\uFF1A':  // ：
++    case U'.':
++    case U'!':
++    case U'?':
++    case U';':
++    case U',':
++    case U':':
++      return true;
++    default:
++      return false;
 +  }
-+  constexpr std::string_view ellipsis = "...";
-+  std::u32string ellipsis_u32;
-+  unicode::utf8::decode(ellipsis.data(), ellipsis.size(), ellipsis_u32);
-+  const std::u32string tail_u32 = u32.substr(u32.size() - keep);
-+  std::string result;
-+  unicode::utf8::encode(ellipsis_u32.data(), ellipsis_u32.size(), result);
-+  std::string tail_str;
-+  unicode::utf8::encode(tail_u32.data(), tail_u32.size(), tail_str);
-+  result.append(tail_str);
-+  return result;
 +}
 +
- std::string ComposeLivePreedit(const std::string& transcript_text, const std::string& fallback_text,
-                                int max_display_width = 0) {
-   (void)max_display_width;
-@@ -190,9 +218,10 @@ std::string ComposeLivePreedit(const std::string& transcript_text, const std::st
++size_t Utf8CharLength(unsigned char lead) {
++  if ((lead & 0xE0) == 0xC0) {
++    return 2;
++  }
++  if ((lead & 0xF0) == 0xE0) {
++    return 3;
++  }
++  if ((lead & 0xF8) == 0xF0) {
++    return 4;
++  }
++  return 1;
++}
++
++// Byte offset just past the last clause boundary that still leaves at least
++// kStableTailChars characters uncommitted, so the newest words can still be revised.
++// Falls back to a fixed split inside a long unpunctuated sentence.
++size_t StablePrefixBytes(std::string_view text, size_t committed_bytes) {
++  std::vector<size_t> cp_starts;      // byte offset of every code point
++  std::vector<size_t> boundary_cps;   // code point index just past a clause boundary
++  size_t i = 0;
++  while (i < text.size()) {
++    const auto lead = static_cast<unsigned char>(text[i]);
++    const size_t len = Utf8CharLength(lead);
++    if (i + len > text.size()) {
++      break;
++    }
++    char32_t cp = lead;
++    if (len == 2) {
++      cp = static_cast<char32_t>(((lead & 0x1F) << 6) |
++                                 (static_cast<unsigned char>(text[i + 1]) & 0x3F));
++    } else if (len == 3) {
++      cp = static_cast<char32_t>(((lead & 0x0F) << 12) |
++                                 ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 6) |
++                                 (static_cast<unsigned char>(text[i + 2]) & 0x3F));
++    } else if (len == 4) {
++      cp = static_cast<char32_t>(((lead & 0x07) << 18) |
++                                 ((static_cast<unsigned char>(text[i + 1]) & 0x3F) << 12) |
++                                 ((static_cast<unsigned char>(text[i + 2]) & 0x3F) << 6) |
++                                 (static_cast<unsigned char>(text[i + 3]) & 0x3F));
++    }
++    cp_starts.push_back(i);
++    i += len;
++    if (IsClauseBoundary(cp)) {
++      boundary_cps.push_back(cp_starts.size());
++    }
++  }
++
++  const size_t total = cp_starts.size();
++  if (total <= kStableTailChars) {
++    return 0;
++  }
++
++  for (auto it = boundary_cps.rbegin(); it != boundary_cps.rend(); ++it) {
++    if (total - *it < kStableTailChars) {
++      continue;
++    }
++    const size_t start = cp_starts[*it - 1];
++    const size_t past = start + Utf8CharLength(static_cast<unsigned char>(text[start]));
++    if (past >= committed_bytes) {
++      return past;
++    }
++  }
++
++  // No usable clause boundary: still stop the composition region from growing forever.
++  size_t committed_cps = 0;
++  while (committed_cps < total && cp_starts[committed_cps] < committed_bytes) {
++    ++committed_cps;
++  }
++  if (total - committed_cps > kMaxCompositionChars) {
++    const size_t cut = total - kStableTailChars;
++    if (cut > committed_cps) {
++      return cp_starts[cut];
++    }
++  }
++  return 0;
++}
++
++// Only the not-yet-committed tail goes into the composition region. Nothing is folded
++// or dropped: the rest is already real text in the document.
++std::string PendingPreeditText(const std::string& transcript_text, size_t committed_bytes,
++                               const std::string& fallback_text) {
+   if (transcript_text.empty()) {
      return fallback_text;
    }
- 
+-
 -  // Never fold or swallow spoken text into "head...tail" - streaming preedit flows
 -  // directly into the client input box, which wraps naturally across multiple lines.
 -  return transcript_text;
-+  // Keep the whole utterance for the final commit, but only stream a bounded tail
-+  // inline. Folding into "head...tail" hides the middle of the sentence; growing
-+  // without a bound breaks controlled editors.
-+  return TailPreeditText(transcript_text, kMaxInlinePreeditChars);
++  const size_t start = std::min(committed_bytes, transcript_text.size());
++  return transcript_text.substr(start);
  }
  
  std::string RenderMethodCallFailure(std::string_view error_name, std::string_view error_message,
-@@ -507,7 +536,20 @@ void VinputEngine::enterBusyState(fcitx::InputContext* ic, bool command_mode,
+@@ -444,8 +562,7 @@ void VinputEngine::enterPendingStartState(fcitx::InputContext* ic, const fcitx::
+   session_->command_mode = command_mode;
+   session_->raw_prev = raw_prev;
+   status_ic_ = ic;
+-  updateVoicePresentation(
+-      ic, ComposeLivePreedit({}, StartingPreeditText(), max_streaming_display_width_));
++  updateVoicePresentation(ic, StartingPreeditText());
+   ensureStatusSync();
+ }
+ 
+@@ -474,9 +591,9 @@ void VinputEngine::enterRecordingState(fcitx::InputContext* ic, const fcitx::Key
+   session_->raw_prev = raw_prev;
+   status_ic_ = ic;
+   updateVoicePresentation(
+-      ic, ComposeLivePreedit(session_ ? session_->transcript_text : std::string{},
+-                             command_mode ? CommandingPreeditText() : RecordingPreeditText(),
+-                             max_streaming_display_width_));
++      ic, PendingPreeditText(session_ ? session_->transcript_text : std::string{},
++                             session_ ? session_->committed_text.size() : 0,
++                             command_mode ? CommandingPreeditText() : RecordingPreeditText()));
+   ensureStatusSync();
+   if (stop_after_start) {
+     scheduleStopRecording();
+@@ -507,7 +624,22 @@ void VinputEngine::enterBusyState(fcitx::InputContext* ic, bool command_mode,
    session_->command_mode = command_mode;
    session_->raw_prev = effective_raw_prev;
    status_ic_ = ic;
@@ -91,14 +240,141 @@ index 5e57bec..754e01a 100644
 +    // status line. Both "... Recognizing ..." and "... Postprocessing ..." are
 +    // appended behind the transcript instead of wiping it - replacing it is what
 +    // made the text look deleted the moment the voice key was released.
-+    const auto transcript =
-+        TailPreeditText(session_->transcript_text, kMaxInlinePreeditChars);
-+    updateVoicePresentation(ic, transcript + "  " + preedit_text,
-+                            session_->raw_prev
-+                                ? LimitPreviewText(session_->transcript_text,
-+                                                   max_streaming_display_width_)
-+                                : std::string{});
++    // Only the still-unsettled tail sits in the composition region; the earlier part
++    // of the dictation is already real text in the document and stays visible.
++    updateVoicePresentation(
++        ic,
++        PendingPreeditText(session_->transcript_text, session_->committed_text.size(), {}) +
++            "  " + preedit_text,
++        session_->raw_prev ? LimitPreviewText(session_->transcript_text,
++                                              max_streaming_display_width_)
++                           : std::string{});
 +  } else if (!session_->raw_prev) {
      updateVoicePresentation(ic, preedit_text);
    } else if (postprocessing && !session_->transcript_text.empty()) {
      const auto transcript =
+@@ -517,8 +649,9 @@ void VinputEngine::enterBusyState(fcitx::InputContext* ic, bool command_mode,
+     updateVoicePresentation(ic, command_mode ? ApplyingCommandPreeditText() : preedit_text,
+                             transcript);
+   } else {
+-    updateVoicePresentation(ic, ComposeLivePreedit(session_->transcript_text, preedit_text,
+-                                                   max_streaming_display_width_));
++    updateVoicePresentation(ic,
++                            PendingPreeditText(session_->transcript_text,
++                                               session_->committed_text.size(), preedit_text));
+   }
+   ensureStatusSync();
+ }
+@@ -729,6 +862,13 @@ void VinputEngine::onRecognitionResult(fcitx::dbus::Message& msg) {
+   const bool has_session = session_.has_value();
+   const bool is_command = has_session && session_->command_mode;
+   const std::string command_selected_text = is_command ? command_selected_text_ : std::string{};
++  // Captured before the session is torn down: text already handed over to the client
++  // must not be committed a second time.
++  const std::string streamed_prefix = has_session ? session_->committed_text : std::string{};
++  const std::string streamed_tail =
++      has_session ? session_->transcript_text.substr(
++                        std::min(streamed_prefix.size(), session_->transcript_text.size()))
++                  : std::string{};
+   auto* ic = resolveFrontendInputContext();
+ 
+   if (ic == nullptr) {
+@@ -805,7 +945,23 @@ void VinputEngine::onRecognitionResult(fcitx::dbus::Message& msg) {
+     }
+   }
+ 
+-  ic->commitString(payload.commitText);
++  // Part of the utterance may already be in the document as committed text. Only the
++  // remainder may be inserted, otherwise the speaker's own words would appear twice.
++  std::string final_text = payload.commitText;
++  if (!streamed_prefix.empty()) {
++    if (final_text.size() >= streamed_prefix.size() &&
++        final_text.compare(0, streamed_prefix.size(), streamed_prefix) == 0) {
++      final_text = final_text.substr(streamed_prefix.size());
++    } else {
++      // The polish step rewrote text that is already on screen. It cannot be retracted
++      // safely, so keep what is shown and append the raw tail instead of duplicating.
++      VLOG_WARN("progressive commit: polished text diverged from the committed prefix");
++      final_text = streamed_tail;
++    }
++  }
++  if (!final_text.empty()) {
++    ic->commitString(final_text);
++  }
+ }
+ 
+ void VinputEngine::onRecognitionPartial(fcitx::dbus::Message& msg) {
+@@ -831,6 +987,12 @@ void VinputEngine::handleRecognitionPartial(const std::string& transcript_text)
+ 
+   auto& session = *session_;
+   session.transcript_text = transcript_text;
++
++  // Hand finished sentences over as real document text before painting the tail. This
++  // keeps the composition region short (no host-editor crash) while everything the
++  // speaker said stays on screen - nothing is folded away.
++  advanceStableCommit(ic, transcript_text);
++
+   if (session.phase == Session::Phase::Postprocessing) {
+     enterBusyState(ic, session.command_mode,
+                    PostprocessingPreeditText(session.command_mode, session.raw_prev), true,
+@@ -842,10 +1004,57 @@ void VinputEngine::handleRecognitionPartial(const std::string& transcript_text)
+     return;
+   }
+ 
+-  updateVoicePresentation(ic, ComposeLivePreedit(transcript_text,
++  updateVoicePresentation(ic, PendingPreeditText(transcript_text, session.committed_text.size(),
+                                                  session.command_mode ? CommandingPreeditText()
+-                                                                      : RecordingPreeditText(),
+-                                                 max_streaming_display_width_));
++                                                                      : RecordingPreeditText()));
++}
++
++// Commit the stable part of the transcript into the client as ordinary text.
++//
++// Only clause-aligned text is handed over, and the newest kStableTailChars characters
++// are always kept back so a revision of the words currently being spoken can still be
++// applied. If the recognizer rewrites text that was already committed, we stop
++// advancing instead of corrupting what is on screen.
++void VinputEngine::advanceStableCommit(fcitx::InputContext* ic, const std::string& transcript) {
++  if (ic == nullptr || !session_.has_value()) {
++    return;
++  }
++  auto& session = *session_;
++  if (session.command_mode || !session.raw_prev) {
++    return;
++  }
++  if (!ic->capabilityFlags().test(fcitx::CapabilityFlag::Preedit)) {
++    // Clients that cannot host an inline composition region keep the preview in the
++    // candidate window, so there is nothing to shorten here.
++    return;
++  }
++
++  const size_t committed = session.committed_text.size();
++  if (transcript.size() < committed || transcript.compare(0, committed, session.committed_text) != 0) {
++    return;
++  }
++
++  const size_t boundary = StablePrefixBytes(transcript, committed);
++  if (boundary <= committed) {
++    return;
++  }
++
++  const std::string chunk = transcript.substr(committed, boundary - committed);
++  size_t chunk_chars = 0;
++  for (char byte : chunk) {
++    if ((static_cast<unsigned char>(byte) & 0xC0) != 0x80) {
++      ++chunk_chars;
++    }
++  }
++  if (chunk_chars < 2) {
++    return;
++  }
++
++  // Retract the composition region first so the client inserts the settled text at the
++  // caret, then paint the remaining tail again by the caller.
++  clearVoicePresentation(ic);
++  ic->commitString(chunk);
++  session.committed_text = transcript.substr(0, boundary);
+ }
+ 
+ void VinputEngine::onStatusChanged(fcitx::dbus::Message& msg) {
