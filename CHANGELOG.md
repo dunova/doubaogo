@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.5 — 2026-11-14
+
+- **Keystroke path pinned out of swap (`MemorySwapMax=0`)**: On zram hosts the kernel treated the idle-looking Wine engine as a swap candidate — observed 470MB swap peak on `doubao-keyboard.service`, with `ImeService.exe` alone holding ~271MB in zram. Every keypress then paid a decompress round-trip, which is the typing-lag users felt. All generated `doubao-*.service` units now set `MemorySwapMax=0` so the engine, broker and host can never be paged out; swappiness stays at the vendor default because 150 is already correct for zram-backed swap.
+
 ## 0.9.4 — 2026-11-12
 
 - **Reverted 0.9.3: dictation shows what you are saying again.** 0.9.3 stopped creating a client composition region and inserted text only once a sentence settled. It removed the crash but also removed the live feedback: during speech the input box stayed empty and whole sentences appeared one at a time, so the speaker could not read what they had just said. That is a regression, not a fix, and it is withdrawn.

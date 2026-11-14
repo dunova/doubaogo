@@ -75,3 +75,4 @@ docs/releases/0.9.4.md
 patches/fcitx5-vinput/0001-feat-dictation.patch
 patches/fcitx5-vinput/0002-fix-dictation.patch
 patches/fcitx5-vinput/README.md
+docs/releases/0.9.5.md

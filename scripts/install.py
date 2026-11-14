@@ -54,6 +54,10 @@ PartOf=graphical-session.target
 
 [Service]
 ExecStart={unit_quote(command)}
+# The keystroke/dictation path cannot tolerate swap-in stalls: on zram hosts the
+# kernel will otherwise page out the idle-looking Wine engine and every keypress
+# pays a decompress round-trip. Pin the whole unit out of swap instead.
+MemorySwapMax=0
 Restart=always
 RestartSec=2
 TimeoutStopSec=20
