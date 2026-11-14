@@ -41,6 +41,11 @@ def plan(prefix, unit_dir, voice=False, settings=False):
                 'Library='+addon, 'Library='+str(library.with_suffix(''))))
     put(prefix / 'share/icons/hicolor/scalable/apps/doubao-ime-linux.svg',
         (ROOT/'fcitx5/icons/doubao-ime-linux.svg').read_bytes())
+    if (ROOT/'fcitx5/icons/doubaogo.png').exists():
+        put(prefix / 'share/icons/hicolor/256x256/apps/doubaogo-settings.png',
+            (ROOT/'fcitx5/icons/doubaogo.png').read_bytes())
+        put(prefix / 'share/icons/hicolor/256x256/apps/doubao-ime-linux.png',
+            (ROOT/'fcitx5/icons/doubaogo.png').read_bytes())
     put(prefix / 'share/fcitx5/inputmethod/doubao.conf', (ROOT/'fcitx5/doubao.conf').read_bytes())
     commands = {'keyboard': launcher('doubao-keyboard', [ROOT/'scripts/headless.py',
                     '--prefix', 'keyboard', '--', sys.executable, ROOT/'bridge/keyboard_broker.py'])}
@@ -72,13 +77,17 @@ WantedBy=graphical-session.target default.target
         desktop_command = str(command).replace('\\','\\\\').replace('"','\\"').replace('`','\\`').replace('$','\\$').replace('%','%%')
         put(prefix/'share/applications/doubao-settings.desktop', f'''[Desktop Entry]
 Type=Application
-Name=Doubao input settings
-Name[zh_CN]=豆包输入法设置（官方）
-Comment=Keyboard settings for the experimental Fcitx bridge
+Name=DoubaoGO Settings
+Name[zh_CN]=DoubaoGO 输入法设置
+GenericName=Input Method Settings
+GenericName[zh_CN]=输入法设置
+Comment=Core settings and preferences for DoubaoGO
+Comment[zh_CN]=DoubaoGO (豆包GO) 核心引擎与个性化设置
 Exec="{desktop_command}"
-Icon=doubao-ime-linux
+Icon=doubaogo-settings
 Terminal=false
-Categories=Settings;
+Categories=Settings;Utility;
+Keywords=doubao;doubaogo;ime;pinyin;input;settings;输入法;豆包;设置;
 ''')
     return files
 
